@@ -529,6 +529,24 @@ def renew_via_browser(server_id: str) -> bool:
                             print("✅ 浏览器续期完成，页面计时器已更新")
                             return True
                 print(f"⚠️ 等了 90 秒计时器没变（点击前/当前都是 {_initial_hours} 小时），浏览器续期未确认成功")
+                # 刷新一次再看：MWS 是 SPA，续期成功后前端计时器可能不刷新，不刷新看不出来。
+                # 截图里没弹窗也一样：弹窗消失可能是通过了，也可能是超时/失败后自动关了，不能单凭没弹窗就认定成功。
+                try:
+                    print("🔄 刷新页面再确认一次计时器...")
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                    time.sleep(3)
+                    _txt2 = page.locator("body").inner_text(timeout=5000) or ""
+                    _h2 = _timer_hours(_txt2)
+                    print(f"🔍 刷新后计时器: {_h2} 小时（点击前: {_initial_hours} 小时）")
+                    page.screenshot(path="mws_browser_renew_after_reload.png")
+                    if _h2 is not None and _initial_hours is not None and _h2 > _initial_hours:
+                        print("✅ 刷新后计时器变大了，浏览器续期成功")
+                        return True
+                    if _h2 is not None and _h2 >= 168:
+                        print("✅ 刷新后计时器已到满格 7 天（168 小时），视为续期成功")
+                        return True
+                except Exception as _e:
+                    print(f"🔍 刷新确认失败: {_e}")
                 print("⚠️ 等了 90 秒没确认到计时器更新，请看截图/手动检查")
                 try:
                     page.screenshot(path="mws_browser_renew.png")
