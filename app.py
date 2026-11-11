@@ -447,10 +447,12 @@ def renew_via_browser(server_id: str) -> bool:
                 ctx = browser.new_context(viewport={'width': 1920, 'height': 1080}, user_agent=DISCORD_UA, proxy=proxy_arg, ignore_https_errors=True)
             try:
                 # __Host- 开头的 Cookie 不能带 Domain 属性，否则浏览器会拒收、登录失败。
-                # 用 url 而不是 domain 来设，这样才是 host-only Cookie，符合 __Host- 要求。
+                # 只用 url 来设（不给 domain/path），这样才是 host-only Cookie，符合 __Host- 要求。
+                # Playwright 规定：url 和 domain/path 二选一，只给 url，让它自己推 domain/path。
+                # 上一版同时给了 url 和 path，patchright 校验报 "Cookie should have either url or path"。
                 ctx.add_cookies([{
                     'name': COOKIE_NAME, 'value': COOKIE,
-                    'url': SITE_ORIGIN, 'path': '/',
+                    'url': SITE_ORIGIN,
                     'secure': True, 'httpOnly': True, 'sameSite': 'Lax',
                 }])
                 page = ctx.new_page()
