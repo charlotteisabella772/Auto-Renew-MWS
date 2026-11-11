@@ -475,6 +475,17 @@ def renew_via_browser(server_id: str) -> bool:
                     print("❌ 没找到“重置计时器”按钮，可能没登录成功，当前 URL:", page.url)
                     page.screenshot(path="mws_no_renew_btn.png")
                     return False
+                # 先记下点击前的计时器（小时数），续期成功后它应该变大 7 天左右
+                _initial_hours = None
+                try:
+                    _t0 = page.locator("body").inner_text(timeout=5000) or ""
+                    import re as _re2
+                    _m0 = _re2.search(r"(\d+)d\s+(\d+)h\s+left", _t0)
+                    if _m0:
+                        _initial_hours = int(_m0.group(1)) * 24 + int(_m0.group(2))
+                        print(f"🔍 点击前计时器: {_initial_hours} 小时")
+                except Exception:
+                    pass
                 # 先去掉可能挡住按钮的 ncmp 横幅（HidenCloud 同款问题）
                 try:
                     page.evaluate("() => { const el = document.getElementById('ncmp__tool'); if (el) el.remove(); }")
@@ -488,20 +499,36 @@ def renew_via_browser(server_id: str) -> bool:
                 time.sleep(2)
                 # 弹窗里有 Turnstile 就点掉，没有就直接等
                 if page.query_selector_all(CF_IFRAME_SELECTOR):
-                    if not _browser_click_turnstile(page, timeout=90):
-                        print("⚠️ Turnstile 未确认通过，仍继续等页面变化...")
-                # 等计时器变化 / 处理中消失，最长等 60 秒
-                for _ in range(60):
+                    if not _browser_click_turnstile(page, timeout=120):
+                        print("⚠️ Turnstile 120 秒内未确认通过，可能是代理 IP 被 Cloudflare 标记了，仍继续等页面变化...")
+                        try:
+                            page.screenshot(path="mws_turnstile_fail.png")
+                            print("📸 已保存 Turnstile 失败截图 mws_turnstile_fail.png")
+                        except Exception:
+                            pass
+                # 等计时器变化，最长等 90 秒。页面是英文版，计时器是 "Timer 4d 18h left" / "Timer 11d 18h left"，
+                # 不是中文“剩余”，上一版用中文判断永远等不到。
+                import re as _re
+                def _timer_hours(txt):
+                    m = _re.search(r"(\d+)d\s+(\d+)h\s+left", txt)
+                    if m:
+                        return int(m.group(1)) * 24 + int(m.group(2))
+                    return None
+                for _ in range(90):
                     time.sleep(1)
                     try:
                         txt = page.locator("body").inner_text(timeout=5000)
                     except Exception:
                         txt = ""
-                    if "剩余" in txt and "处理中" not in txt:
-                        # 再等 2 秒确认不是处理中
-                        time.sleep(2)
-                        print("✅ 浏览器续期完成，页面计时器已更新")
-                        return True
+                    h = _timer_hours(txt)
+                    if h is not None:
+                        print(f"🔍 当前计时器: {h} 小时（点击前: {_initial_hours} 小时）")
+                        if _initial_hours is None or h > _initial_hours:
+                            print("✅ 浏览器续期完成，页面计时器已更新")
+                            return True
+                    # Turnstile 弹窗还在就继续点
+                    if page.query_selector_all(CF_IFRAME_SELECTOR):
+                        _browser_click_turnstile(page, timeout=20)
                 print("⚠️ 等了 60 秒没确认到计时器更新，请看截图/手动检查")
                 try:
                     page.screenshot(path="mws_browser_renew.png")
