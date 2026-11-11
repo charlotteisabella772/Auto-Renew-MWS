@@ -151,6 +151,45 @@ def renew_server(server_id: str):
         print(f"❌ 服务器 [{server_id}] 请求发生异常, 请检查服务器是否被删除: {e}")
         return False, None, None
 
+def get_server_status_http(server_id: str):
+    """用 API 查服务器运行状态，返回 'running' / 'offline' / None（查不到）。
+    先试 GET /api/bots/{id}，这个接口不一定存在，查不到就返回 None，不影响主流程，
+    真正的状态判断在浏览器里做（页面正文里有 Running / Offline）。"""
+    for url in (f"{SITE_ORIGIN}/api/bots/{server_id}", f"{API_ORIGIN}/api/bots/{server_id}"):
+        try:
+            resp = requests.get(url, headers=login_headers(), timeout=15, impersonate="chrome", proxies=build_proxies())
+            if resp.status_code != 200:
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+            # 兼容几种可能的字段：data.status / status / state / online / running
+            raw = ""
+            if isinstance(data, dict):
+                for key in ("status", "state", "running_status"):
+                    if key in data:
+                        raw = str(data[key]); break
+                if not raw and isinstance(data.get("data"), dict):
+                    for key in ("status", "state"):
+                        if key in data["data"]:
+                            raw = str(data["data"][key]); break
+                if not raw:
+                    for key in ("online", "running", "is_running"):
+                        if key in data:
+                            raw = "running" if data[key] else "offline"; break
+            print(f"🔍 [{server_id}] API 状态查询 {url}: {str(data)[:300]}")
+            low = raw.lower()
+            if "run" in low or low in ("online", "up", "active", "1", "true"):
+                return "running"
+            if any(w in low for w in ("off", "stop", "dead", "exit", "down", "0", "false")):
+                return "offline"
+            return raw or None
+        except Exception as e:
+            print(f"🔍 [{server_id}] API 状态查询异常: {e}")
+            continue
+    return None
+
 # ================= Discord OAuth 登录（API 请求失败时的兜底，纯 HTTP） =================
 #   1) GET /auth/login 拿授权 URL（含 state），Session 自动种下 oauth_state cookie
 #   2) DISCORD_TOKEN 调 Discord OAuth2 API 授权，拿回带 code 的回调 location
@@ -419,6 +458,47 @@ def _browser_click_turnstile(page, timeout=90):
         _time.sleep(1)
     return bool(_browser_turnstile_token(page))
 
+def _browser_check_and_restart(page) -> str:
+    """在浏览器里看服务器是不是 Running，不是就点 Restart。
+    返回 'running' / 'offline' / None（没识别到状态）。"""
+    try:
+        body = page.locator("body").inner_text(timeout=5000) or ""
+    except Exception:
+        return None
+    if "Running" in body:
+        print("✅ 服务器运行中，无需重启")
+        return "running"
+    offline_words = ("Offline", "Stopped", "Not running", "离线", "已停止", "已离线")
+    if not any(w in body for w in offline_words):
+        print("🔍 页面里没看到 Running，也没看到 Offline/Stopped，跳过重启判断")
+        return None
+    print("⚠️ 服务器离线，尝试点 Restart 重启...")
+    try:
+        restart_btn = page.locator('button:has-text("Restart"), button:has-text("重启")').first
+        restart_btn.wait_for(state="visible", timeout=15000)
+        restart_btn.click(timeout=10000)
+    except Exception as e:
+        print(f"❌ 没找到/点不了 Restart 按钮: {e}")
+        return "offline"
+    time.sleep(3)
+    # 重启也可能弹出 Turnstile，顺手点掉
+    try:
+        if page.query_selector_all(CF_IFRAME_SELECTOR):
+            _browser_click_turnstile(page, timeout=60)
+    except Exception:
+        pass
+    for _ in range(60):
+        time.sleep(1)
+        try:
+            txt = page.locator("body").inner_text(timeout=5000) or ""
+        except Exception:
+            txt = ""
+        if "Running" in txt:
+            print("✅ 重启成功，服务器已回到 Running")
+            return "running"
+    print("⚠️ 点了 Restart，等了 60 秒还是没看到 Running，请手动去面板看一眼")
+    return "offline"
+
 def renew_via_browser(server_id: str) -> bool:
     """用浏览器手动点一次“重置计时器（续期7天）”，成功返回 True"""
     if not COOKIE:
@@ -466,6 +546,8 @@ def renew_via_browser(server_id: str) -> bool:
                     print(f"🔍 页面里有没有 Reset timer / 重置计时器: {('Reset timer' in _body or '重置计时器' in _body)}，有没有登录提示: {('登录' in _body or 'Sign in' in _body)}")
                 except Exception as _e:
                     print(f"🔍 页面信息采集失败: {_e}")
+                # 先判运行状态：离线就点 Restart，Running 就直接续期
+                _browser_check_and_restart(page)
                 # 找到“重置计时器”按钮并点击：页面是英文版，按钮文字是 Reset timer，不是中文“重置计时器”
                 # 上次调试日志里正文就是 "Reset timer (extend 7 days)"，所以中文定位不到
                 btn = page.locator('button:has-text("Reset timer"), button:has-text("重置计时器")').first
@@ -605,6 +687,12 @@ def main():
 
     if all_ok:
         print("🏁 全部服务器续期成功，续期任务完成")
+        # API 续期成功时也顺手查一下运行状态，离线就走浏览器重启（浏览器里会先 Restart 再续期）
+        for s_id in server_list:
+            st = get_server_status_http(s_id)
+            if st == "offline":
+                print(f"⚠️ [{s_id}] API 续期成功但服务器离线，走浏览器重启...")
+                renew_via_browser(s_id)
     else:
         # ---------- COOKIE失效走第二轮：浏览器登录 Discord 获取新 COOKIE ----------
         if not DISCORD_TOKEN:
