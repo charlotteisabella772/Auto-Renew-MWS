@@ -1,4 +1,3 @@
-
 name: Auto Renew MWS
 
 on:
@@ -24,8 +23,12 @@ jobs:
       - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq wget
-          pip install curl_cffi
+          sudo apt-get install -y jq wget xvfb
+          # 安装 Google Chrome（浏览器兜底用 patchright channel="chrome" 需要它）
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+          rm -f google-chrome-stable_current_amd64.deb
+          pip install curl_cffi patchright
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -45,7 +48,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python3 app.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u app.py
 
       - name: 🧽 清理进程和临时文件
         if: always()
