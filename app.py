@@ -446,14 +446,24 @@ def renew_via_browser(server_id: str) -> bool:
                 browser = pw.chromium.launch(channel="chrome", headless=False, args=launch_args, proxy=proxy_arg)
                 ctx = browser.new_context(viewport={'width': 1920, 'height': 1080}, user_agent=DISCORD_UA, proxy=proxy_arg, ignore_https_errors=True)
             try:
+                # __Host- 开头的 Cookie 不能带 Domain 属性，否则浏览器会拒收、登录失败。
+                # 用 url 而不是 domain 来设，这样才是 host-only Cookie，符合 __Host- 要求。
                 ctx.add_cookies([{
                     'name': COOKIE_NAME, 'value': COOKIE,
-                    'domain': 'cloud.m-ws.cc', 'path': '/',
+                    'url': SITE_ORIGIN, 'path': '/',
                     'secure': True, 'httpOnly': True, 'sameSite': 'Lax',
                 }])
                 page = ctx.new_page()
                 page.goto(f"{SITE_ORIGIN}/bots/{server_id}", wait_until="domcontentloaded", timeout=60000)
                 time.sleep(3)
+                # 调试：打印页面标题和正文前 300 字，看是不是没登录 / 被踢回登录页
+                try:
+                    print(f"🔍 浏览器当前 URL: {page.url}，标题: {page.title()}")
+                    _body = page.locator("body").inner_text(timeout=5000) or ""
+                    print(f"🔍 页面正文前 300 字: {_body[:300].replace(chr(10), ' ')}")
+                    print(f"🔍 页面里有没有“重置计时器”: {'重置计时器' in _body}，有没有登录提示: {('登录' in _body or 'Sign in' in _body)}")
+                except Exception as _e:
+                    print(f"🔍 页面信息采集失败: {_e}")
                 # 找到“重置计时器”按钮并点击
                 btn = page.locator('button:has-text("重置计时器")').first
                 try:
