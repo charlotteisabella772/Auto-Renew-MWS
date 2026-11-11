@@ -463,11 +463,12 @@ def renew_via_browser(server_id: str) -> bool:
                     print(f"🔍 浏览器当前 URL: {page.url}，标题: {page.title()}")
                     _body = page.locator("body").inner_text(timeout=5000) or ""
                     print(f"🔍 页面正文前 300 字: {_body[:300].replace(chr(10), ' ')}")
-                    print(f"🔍 页面里有没有“重置计时器”: {'重置计时器' in _body}，有没有登录提示: {('登录' in _body or 'Sign in' in _body)}")
+                    print(f"🔍 页面里有没有 Reset timer / 重置计时器: {('Reset timer' in _body or '重置计时器' in _body)}，有没有登录提示: {('登录' in _body or 'Sign in' in _body)}")
                 except Exception as _e:
                     print(f"🔍 页面信息采集失败: {_e}")
-                # 找到“重置计时器”按钮并点击
-                btn = page.locator('button:has-text("重置计时器")').first
+                # 找到“重置计时器”按钮并点击：页面是英文版，按钮文字是 Reset timer，不是中文“重置计时器”
+                # 上次调试日志里正文就是 "Reset timer (extend 7 days)"，所以中文定位不到
+                btn = page.locator('button:has-text("Reset timer"), button:has-text("重置计时器")').first
                 try:
                     btn.wait_for(state="visible", timeout=30000)
                 except Exception:
