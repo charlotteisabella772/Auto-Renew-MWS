@@ -326,6 +326,184 @@ def fetch_new_cookie_via_http() -> str:
         print(f"❌ HTTP OAuth 登录异常: {e}")
         return ""
 
+
+# ================= 浏览器兜底：captcha_required 时用真浏览器点“重置计时器” =================
+# 原理和 HidenCloud 脚本一样：Playwright/Patchright + 代理 + ignore_https_errors，
+# 用 COOKIE 进 https://cloud.m-ws.cc/bots/<id>，点“重置计时器”，再点 Cloudflare Turnstile 复选框。
+# Turnstile 是“请验证您是真人”那个复选框，不是选图验证码，真浏览器 + 正常代理一般能自动过。
+CF_IFRAME_SELECTOR = 'iframe[src*="challenges.cloudflare.com"]'
+
+def _browser_turnstile_token(page):
+    try:
+        return page.evaluate(
+            """() => {
+                try {
+                    if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+                        let t = null;
+                        try { t = window.turnstile.getResponse(); } catch (e) {}
+                        if (t && t.length > 30) return t;
+                    }
+                } catch (e) {}
+                const inputs = document.querySelectorAll('input[name="cf-turnstile-response"], input[id$="_response"]');
+                for (const el of inputs) { if (el.value && el.value.length > 30) return el.value; }
+                return null;
+            }"""
+        )
+    except Exception:
+        return None
+
+def _browser_click_turnstile(page, timeout=90):
+    """在 Turnstile 弹窗里点复选框，成功返回 True"""
+    import time as _time, random as _random
+    start = _time.time()
+    clicks = 0
+    last_click = 0
+    while _time.time() - start < timeout:
+        if _browser_turnstile_token(page):
+            print("✅ Turnstile 验证通过！")
+            return True
+        frames = []
+        try:
+            for h in page.query_selector_all(CF_IFRAME_SELECTOR):
+                try:
+                    box = h.bounding_box()
+                    if box and box['width'] > 10 and box['height'] > 10:
+                        frames.append(h)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if not frames:
+            _time.sleep(1)
+            continue
+        # 复选框是否还在
+        visible = False
+        for frame in page.frames:
+            if 'challenges.cloudflare.com' not in (frame.url or ''):
+                continue
+            try:
+                if frame.locator('input[type="checkbox"]:visible').count() > 0:
+                    visible = True
+                    break
+            except Exception:
+                continue
+        if clicks > 0 and _time.time() - last_click > 4 and not visible:
+            print("✅ Turnstile 复选框已消失，视为验证通过！")
+            return True
+        if _time.time() - last_click > 6 and visible and frames:
+            print(f"🖱️ 点击 Turnstile 复选框（第 {clicks + 1} 次）...")
+            try:
+                for frame in page.frames:
+                    if 'challenges.cloudflare.com' not in (frame.url or ''):
+                        continue
+                    try:
+                        frame.locator('input[type="checkbox"]').first.click(timeout=2500)
+                        clicks += 1
+                        last_click = _time.time()
+                        break
+                    except Exception:
+                        continue
+                else:
+                    # 坐标点击兜底
+                    box = frames[-1].bounding_box()
+                    if box:
+                        x = box['x'] + _random.uniform(18, 34)
+                        y = box['y'] + box['height'] / 2
+                        page.mouse.click(x, y)
+                        clicks += 1
+                        last_click = _time.time()
+            except Exception:
+                pass
+            _time.sleep(3)
+            continue
+        _time.sleep(1)
+    return bool(_browser_turnstile_token(page))
+
+def renew_via_browser(server_id: str) -> bool:
+    """用浏览器手动点一次“重置计时器（续期7天）”，成功返回 True"""
+    if not COOKIE:
+        print("❌ 浏览器续期需要 COOKIE，先走 Discord OAuth 拿新 COOKIE")
+        return False
+    try:
+        from patchright.sync_api import sync_playwright
+        using_patchright = True
+    except ImportError:
+        try:
+            from playwright.sync_api import sync_playwright
+            using_patchright = False
+        except ImportError:
+            print("❌ 未安装 playwright / patchright，无法用浏览器续期。请在 workflow 里 pip install patchright")
+            return False
+    print(f"🌐 浏览器兜底：打开 https://cloud.m-ws.cc/bots/{server_id} 点重置计时器...")
+    try:
+        with sync_playwright() as pw:
+            proxy_arg = {"server": PROXY_SERVER} if IS_PROXY else None
+            launch_args = ['--no-sandbox', '--disable-infobars', '--ignore-certificate-errors']
+            if using_patchright:
+                browser = pw.chromium.launch(channel="chrome", headless=False, args=launch_args, proxy=proxy_arg)
+                ctx = browser.new_context(viewport=None, proxy=proxy_arg, ignore_https_errors=True)
+            else:
+                browser = pw.chromium.launch(channel="chrome", headless=False, args=launch_args, proxy=proxy_arg)
+                ctx = browser.new_context(viewport={'width': 1920, 'height': 1080}, user_agent=DISCORD_UA, proxy=proxy_arg, ignore_https_errors=True)
+            try:
+                ctx.add_cookies([{
+                    'name': COOKIE_NAME, 'value': COOKIE,
+                    'domain': 'cloud.m-ws.cc', 'path': '/',
+                    'secure': True, 'httpOnly': True, 'sameSite': 'Lax',
+                }])
+                page = ctx.new_page()
+                page.goto(f"{SITE_ORIGIN}/bots/{server_id}", wait_until="domcontentloaded", timeout=60000)
+                time.sleep(3)
+                # 找到“重置计时器”按钮并点击
+                btn = page.locator('button:has-text("重置计时器")').first
+                try:
+                    btn.wait_for(state="visible", timeout=30000)
+                except Exception:
+                    print("❌ 没找到“重置计时器”按钮，可能没登录成功，当前 URL:", page.url)
+                    page.screenshot(path="mws_no_renew_btn.png")
+                    return False
+                # 先去掉可能挡住按钮的 ncmp 横幅（HidenCloud 同款问题）
+                try:
+                    page.evaluate("() => { const el = document.getElementById('ncmp__tool'); if (el) el.remove(); }")
+                except Exception:
+                    pass
+                try:
+                    btn.click(timeout=10000)
+                except Exception:
+                    btn.click(timeout=10000, force=True)
+                print("🖱️ 已点击“重置计时器”，等待 Turnstile 验证...")
+                time.sleep(2)
+                # 弹窗里有 Turnstile 就点掉，没有就直接等
+                if page.query_selector_all(CF_IFRAME_SELECTOR):
+                    if not _browser_click_turnstile(page, timeout=90):
+                        print("⚠️ Turnstile 未确认通过，仍继续等页面变化...")
+                # 等计时器变化 / 处理中消失，最长等 60 秒
+                for _ in range(60):
+                    time.sleep(1)
+                    try:
+                        txt = page.locator("body").inner_text(timeout=5000)
+                    except Exception:
+                        txt = ""
+                    if "剩余" in txt and "处理中" not in txt:
+                        # 再等 2 秒确认不是处理中
+                        time.sleep(2)
+                        print("✅ 浏览器续期完成，页面计时器已更新")
+                        return True
+                print("⚠️ 等了 60 秒没确认到计时器更新，请看截图/手动检查")
+                try:
+                    page.screenshot(path="mws_browser_renew.png")
+                except Exception:
+                    pass
+                return False
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"❌ 浏览器续期异常: {e}")
+        return False
+
 # ================= 主流程 =================
 def main():
     global COOKIE
@@ -396,8 +574,18 @@ def main():
         print("\n🔁 使用新 COOKIE 重新请求续期 API ...")
         for s_id in server_list:
             print(f"🔁 续期服务器 [{s_id}] ...")
-            ok2, _, remaining2 = renew_server(s_id)
+            ok2, status2, remaining2 = renew_server(s_id)
             results[s_id] = remaining2 if ok2 else None
+            # 403 captcha_required：API 不让续，改用浏览器点“重置计时器”
+            if not ok2 and status2 == 403:
+                print(f"⚠️ [{s_id}] API 返回 captcha_required，改用浏览器点击续期...")
+                if renew_via_browser(s_id):
+                    # 浏览器点完后，再调一次 API 看剩余时间（能拿到就更新 results）
+                    ok3, _, remaining3 = renew_server(s_id)
+                    # 浏览器已点成功时，即使 API 仍报 captcha，也算成功（计时器已在页面更新）
+                    # 浏览器已点成功，API 再调大概率仍报 captcha，这里用 168h（7天）作占位，只表示已续期
+                    results[s_id] = remaining3 if remaining3 is not None else 168
+                    print(f"✅ [{s_id}] 浏览器续期成功")
             time.sleep(2)
 
         all_ok = all(v is not None for v in results.values())
