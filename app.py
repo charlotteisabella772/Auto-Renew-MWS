@@ -514,7 +514,8 @@ def renew_via_browser(server_id: str) -> bool:
                     if m:
                         return int(m.group(1)) * 24 + int(m.group(2))
                     return None
-                for _ in range(90):
+                # 只等 90 秒就停，不要在循环里再调 Turnstile（每次 20 秒，90 次就变成半小时，日志刷屏还停不下来）
+                for _i in range(90):
                     time.sleep(1)
                     try:
                         txt = page.locator("body").inner_text(timeout=5000)
@@ -522,14 +523,13 @@ def renew_via_browser(server_id: str) -> bool:
                         txt = ""
                     h = _timer_hours(txt)
                     if h is not None:
-                        print(f"🔍 当前计时器: {h} 小时（点击前: {_initial_hours} 小时）")
+                        if _i % 15 == 0 or h != _initial_hours:
+                            print(f"🔍 当前计时器: {h} 小时（点击前: {_initial_hours} 小时）")
                         if _initial_hours is None or h > _initial_hours:
                             print("✅ 浏览器续期完成，页面计时器已更新")
                             return True
-                    # Turnstile 弹窗还在就继续点
-                    if page.query_selector_all(CF_IFRAME_SELECTOR):
-                        _browser_click_turnstile(page, timeout=20)
-                print("⚠️ 等了 60 秒没确认到计时器更新，请看截图/手动检查")
+                print(f"⚠️ 等了 90 秒计时器没变（点击前/当前都是 {_initial_hours} 小时），浏览器续期未确认成功")
+                print("⚠️ 等了 90 秒没确认到计时器更新，请看截图/手动检查")
                 try:
                     page.screenshot(path="mws_browser_renew.png")
                 except Exception:
