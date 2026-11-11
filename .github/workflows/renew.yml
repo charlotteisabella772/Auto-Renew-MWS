@@ -50,6 +50,14 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u app.py
 
+      - name: 📸 上传调试截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mws-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
+
       - name: 🧽 清理进程和临时文件
         if: always()
         run: |
